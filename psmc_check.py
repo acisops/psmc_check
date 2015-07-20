@@ -26,6 +26,8 @@ import Ska.Table
 import Ska.Numpy
 import Ska.engarchive.fetch_sci as fetch
 from Chandra.Time import DateTime
+import Chandra.Time
+from numpy import ndarray
 
 import Chandra.cmd_states as cmd_states
 # Matplotlib setup
@@ -116,6 +118,11 @@ def get_options():
     parser.add_option("--T-pin1at",
                       type='float',
                       help="Starting 1PIN1AT temperature (degC)")
+    # adding dh_heater
+    parser.add_option("--dh_heater",
+                      type='int',
+                      default=0,
+                      help="Starting Detector Housing Heater state")
     parser.add_option("--version",
                       action='store_true',
                       help="Print version")
@@ -165,13 +172,24 @@ def main(opt):
         tstart = tnow
 
     # Get temperature telemetry for 3 weeks prior to min(tstart, NOW)
+    # tlm = get_telem_values(min(tstart, tnow),
+    #                        ['1pdeaat','1pin1at',
+    #                         'sim_z', 'aosares1',
+    #                         'dp_dpa_power'],
+    #                        days=opt.days,
+    #                        name_map={'sim_z': 'tscpos',
+    #                                  'aosares1': 'pitch'})
+    #                        days=opt.days,
+    #                        name_map={'sim_z': 'tscpos',
+    #                                  'aosares1': 'pitch'})
     tlm = get_telem_values(min(tstart, tnow),
                            ['1pdeaat','1pin1at',
                             'sim_z', 'aosares1',
-                            'dp_dpa_power'],
+                            'dp_dpa_power','1dahtbon'],
                            days=opt.days,
                            name_map={'sim_z': 'tscpos',
-                                     'aosares1': 'pitch'})
+                                     'aosares1': 'pitch',
+                                     '1dahtbon': 'dh_heater'})
     tlm['tscpos'] = tlm['tscpos'] * -397.7225924607
 
     # make predictions on oflsdir if defined
@@ -204,7 +222,8 @@ def main(opt):
 
 
 def calc_model(model_spec, states, start, stop, T_psmc=None, T_psmc_times=None, 
-               T_pin1at=None,T_pin1at_times=None):
+               T_pin1at=None,T_pin1at_times=None,
+               dh_heater=None,dh_heater_times=None):
     model = xija.XijaModel('psmc', start=start, stop=stop,
                               model_spec=model_spec)
     
@@ -218,8 +237,11 @@ def calc_model(model_spec, states, start, stop, T_psmc=None, T_psmc_times=None,
     #model.comp['eclipse'].set_data(False)
     model.comp['1pdeaat'].set_data(T_psmc, T_psmc_times)
     model.comp['pin1at'].set_data(T_pin1at,T_pin1at_times);
+    # for name in ('ccd_count', 'fep_count', 'vid_board', 'clocking', 'pitch', 'dh_heater'):
     for name in ('ccd_count', 'fep_count', 'vid_board', 'clocking', 'pitch'):
         model.comp[name].set_data(states[name], times)
+
+    model.comp['dh_heater'].set_data(dh_heater,dh_heater_times)
 
     model.make()
     model.calc()
@@ -230,9 +252,13 @@ def make_week_predict(opt, tstart, tstop, bs_cmds, tlm, db):
     logger.debug("In make_week_predict")
 
     # Try to make initial state0 from cmd line options
+    # state0 = dict((x, getattr(opt, x))
+    #               for x in ('pitch', 'simpos', 'ccd_count', 'fep_count',
+    #                         'vid_board', 'clocking', 'T_psmc','T_pin1at'))
     state0 = dict((x, getattr(opt, x))
                   for x in ('pitch', 'simpos', 'ccd_count', 'fep_count',
-                            'vid_board', 'clocking', 'T_psmc','T_pin1at'))
+                            'vid_board', 'clocking', 'T_psmc','T_pin1at',
+                            'dh_heater'))
     
     state0.update({'tstart': tstart - 30,
                    'tstop': tstart,
@@ -296,12 +322,20 @@ def make_week_predict(opt, tstart, tstop, bs_cmds, tlm, db):
     logger.info('Found %d commanded states from %s to %s' %
                  (len(states), states[0]['datestart'], states[-1]['datestop']))
 
+    # htrbfn='/home/edgar/acis/thermal_models/dhheater_history/dahtbon_history.rdb'
+    htrbfn='dahtbon_history.rdb'
+    logger.info('Reading file of dahtrb commands from file %s' % htrbfn)
+    htrb=Ska.Table.read_ascii_table(htrbfn,headerrow=2,headertype='rdb')
+    dh_heater_times=Chandra.Time.date2secs(htrb['time'])
+    dh_heater=htrb['dahtbon']
+
     # Create array of times at which to calculate PSMC temps, then do it.
     logger.info('Calculating PSMC thermal model')
     logger.info('state0 at start of calc is\n%s' % (pformat(state0)))
 
     model = calc_model(opt.model_spec, states, state0['tstart'], tstop,
-                       state0['T_psmc'],None,state0['T_pin1at'], None)
+                       state0['T_psmc'],None,state0['T_pin1at'], None,
+                       dh_heater,dh_heater_times)
 
     # Make the PSMC limit check plots and data files
     plt.rc("axes", labelsize=10, titlesize=12)
@@ -750,6 +784,12 @@ def make_validation_plots(opt, tlm, db):
             'pitch': '%.3f',
             'tscpos': '%d'}
 
+    good_mask = np.ones(len(tlm),dtype='bool')
+    for interval in model.bad_times:
+        bad = ((tlm['date'] >= DateTime(interval[0]).secs)
+            & (tlm['date'] < DateTime(interval[1]).secs))
+        good_mask[bad] = False
+
     plots = []
     logger.info('Making PSMC model validation plots and quantile table')
     quantiles = (1, 5, 16, 50, 84, 95, 99)
@@ -766,6 +806,10 @@ def make_validation_plots(opt, tlm, db):
                                          fig=fig, fmt='-r')
         ticklocs, fig, ax = plot_cxctime(model.times, pred[msid] / scale,
                                          fig=fig, fmt='-b')
+        if  np.any(~good_mask) :
+            ticklocs, fig, ax = plot_cxctime(model.times[~good_mask], tlm[msid][~good_mask] / scale,
+                                         fig=fig, fmt='.c')
+
         ax.set_title(msid.upper() + ' validation')
         ax.set_ylabel(labels[msid])
         ax.grid()
@@ -777,8 +821,8 @@ def make_validation_plots(opt, tlm, db):
 
         # Make quantiles
         if msid == '1pdeaat':
-            ok = tlm[msid] > 30.0
-            ok2 = tlm[msid] > 40.0
+            ok = (( tlm[msid] > 30.0 ) & good_mask )
+            ok2 =(( tlm[msid] > 40.0 ) & good_mask )
         else:
             ok = np.ones(len(tlm[msid]), dtype=bool)
         diff = np.sort(tlm[msid][ok] - pred[msid][ok])
@@ -824,6 +868,114 @@ def make_validation_plots(opt, tlm, db):
         f = open(filename, 'w')
         pickle.dump({'pred': pred, 'tlm': tlm}, f, protocol=-1)
         f.close()
+
+    # adding stuff for resid plots--rje 6/24/14
+    fig = plt.figure(36)
+    fig.clf()
+
+    # this is the python equivalent of the IDL where() function
+    # note parens are required for the & cases.
+    msid='1pdeaat'
+    hot_hrcs = ((tlm['tscpos'] < -85000.0 ) & ( pred[msid] > 40.0 ) & good_mask )
+    hot_hrci = ( ( -85000.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 0.0 ) & ( pred[msid] > 40.0 ) & good_mask )
+    hot_aciss = ( ( 0.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 80000.0 ) & ( pred[msid] > 40.0 ) & good_mask )
+    hot_acisi = ((tlm['tscpos'] > 80000.0 ) & ( pred[msid] > 40.0 ) & good_mask )
+    warm_hrcs = ((tlm['tscpos'] < -85000.0 ) & ( pred[msid] > 30.0 ) & ( pred[msid] < 40.0 ) & good_mask )
+    warm_hrci = ( ( -85000.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 0.0 )& ( pred[msid] > 30.0 ) & ( pred[msid] < 40.0 ) & good_mask )
+    warm_aciss = ( ( 0.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 80000.0 )& ( pred[msid] > 30.0 ) & ( pred[msid] < 40.0 ) & good_mask )
+    warm_acisi = ((tlm['tscpos'] > 80000.0 ) & ( pred[msid] > 30.0 ) & ( pred[msid] < 40.0 ) & good_mask )
+    cold_hrcs = ( (tlm['tscpos'] < -85000.0 ) & ( pred[msid] < 30.0 ) & good_mask )
+    cold_hrci = ( ( -85000.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 0.0 ) & ( pred[msid] < 30.0 ) & good_mask )
+    cold_aciss = ( ( 0.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 80000.0 ) & ( pred[msid] < 30.0 ) & good_mask )
+    cold_acisi = ( (tlm['tscpos'] > 80000.0 ) & ( pred[msid] < 30.0 ) & good_mask )
+
+    plt.plot(tlm['pitch'][hot_hrci],  tlm[msid][hot_hrci] - pred[msid][hot_hrci],  "ob", markersize=5)
+    plt.plot(tlm['pitch'][hot_hrcs], tlm[msid][hot_hrcs] - pred[msid][hot_hrcs],  "ok", markersize=5)
+    plt.plot(tlm['pitch'][hot_aciss], tlm[msid][hot_aciss] - pred[msid][hot_aciss], "or", markersize=5)
+    plt.plot(tlm['pitch'][hot_acisi], tlm[msid][hot_acisi] - pred[msid][hot_acisi], "og", markersize=5)
+
+    plt.plot(tlm['pitch'][warm_hrci], tlm[msid][warm_hrci] - pred[msid][warm_hrci],  "sb", markersize=3)
+    plt.plot(tlm['pitch'][warm_hrcs], tlm[msid][warm_hrcs] - pred[msid][warm_hrcs],  "sk", markersize=3)
+    plt.plot(tlm['pitch'][warm_aciss], tlm[msid][warm_aciss] - pred[msid][warm_aciss], "sr", markersize=3)
+    plt.plot(tlm['pitch'][warm_acisi], tlm[msid][warm_acisi] - pred[msid][warm_acisi], "sg", markersize=3)
+
+    plt.plot(tlm['pitch'][cold_hrci], tlm[msid][cold_hrci] - pred[msid][cold_hrci],  ".b", markersize=2)
+    plt.plot(tlm['pitch'][cold_hrcs], tlm[msid][cold_hrcs] - pred[msid][cold_hrcs],  ".k", markersize=2)
+    plt.plot(tlm['pitch'][cold_aciss], tlm[msid][cold_aciss] - pred[msid][cold_aciss], ".r", markersize=2)
+    plt.plot(tlm['pitch'][cold_acisi], tlm[msid][cold_acisi] - pred[msid][cold_acisi], ".g", markersize=2)
+    # plt.plot(tlm['pitch'][htr_on], tlm[msid][htr_on] - pred[msid][htr_on], "*m", markersize=10)
+
+    plt.ylabel('1PDEAAT Data - Model')
+    plt.xlabel('pitch angle')
+    plt.title('b,k,r,g=hrci,hrcs,aciss,acisi, mod.temp: 0<.<30<s<40<o')
+    plt.grid()
+
+    outfile=os.path.join(outdir,'1pdeaat_resid_pitch.png')
+    fig.savefig(outfile)
+
+    # adding stuff for resid plots--rje 6/24/14
+
+
+    fig = plt.figure(35)
+    fig.clf()
+
+    # this is the python equivalent of the IDL where() function
+    # note parens are required for the & cases.
+    fwd_hrcs = ((tlm['tscpos'] < -85000.0 ) & ( tlm['pitch'] < 65.0 ) & good_mask )
+    fwd_hrci = ( ( -85000.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 0.0 ) & ( tlm['pitch'] < 65.0 ) & good_mask )
+    fwd_aciss = ( ( 0.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 80000.0 ) & ( tlm['pitch'] < 65.0 ) & good_mask )
+    fwd_acisi = ((tlm['tscpos'] > 80000.0 ) & ( tlm['pitch'] < 65.0 ) & good_mask )
+
+    m80_hrcs = ((tlm['tscpos'] < -85000.0 ) & ( tlm['pitch'] > 65.0 ) & ( tlm['pitch'] < 80.0 ) & good_mask )
+    m80_hrci = ( ( -85000.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 0.0 )& ( tlm['pitch'] > 65.0 ) & ( tlm['pitch'] < 80.0 ) & good_mask )
+    m80_aciss = ( ( 0.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 80000.0 )& ( tlm['pitch'] > 65.0 ) & ( tlm['pitch'] < 80.0 ) & good_mask )
+    m80_acisi = ((tlm['tscpos'] > 80000.0 ) & ( tlm['pitch'] > 65.0 ) & ( tlm['pitch'] < 80.0 ) & good_mask )
+
+    mid_hrcs = ((tlm['tscpos'] < -85000.0 ) & ( tlm['pitch'] > 80.0 ) & ( tlm['pitch'] < 90.0 ) & good_mask )
+    mid_hrci = ( ( -85000.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 0.0 )& ( tlm['pitch'] > 80.0 ) & ( tlm['pitch'] < 90.0 ) & good_mask )
+    mid_aciss = ( ( 0.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 80000.0 )& ( tlm['pitch'] > 80.0 ) & ( tlm['pitch'] < 90.0 ) & good_mask )
+    mid_acisi = ((tlm['tscpos'] > 80000.0 ) & ( tlm['pitch'] > 80.0 ) & ( tlm['pitch'] < 90.0 ) & good_mask )
+
+    aft_hrcs = ( (tlm['tscpos'] < -85000.0 ) & ( tlm['pitch'] > 90.0 ) & good_mask )
+    aft_hrci = ( ( -85000.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 0.0 ) & ( tlm['pitch'] > 90.0 ) & good_mask )
+    aft_aciss = ( ( 0.0 < tlm['tscpos'] ) & ( tlm['tscpos'] < 80000.0 ) & ( tlm['pitch'] > 90.0 ) & good_mask )
+    aft_acisi = ( (tlm['tscpos'] > 80000.0 ) & ( tlm['pitch'] > 90.0 ) & good_mask )
+
+    msid='1pdeaat'
+    plt.plot(pred[msid][fwd_hrci], tlm[msid][fwd_hrci] - pred[msid][fwd_hrci],  "ob", markersize=5)
+    plt.plot(pred[msid][fwd_hrcs], tlm[msid][fwd_hrcs] - pred[msid][fwd_hrcs],  "ok", markersize=5)
+    plt.plot(pred[msid][fwd_aciss], tlm[msid][fwd_aciss] - pred[msid][fwd_aciss], "or", markersize=5)
+    plt.plot(pred[msid][fwd_acisi], tlm[msid][fwd_acisi] - pred[msid][fwd_acisi], "og", markersize=5)
+
+    plt.plot(pred[msid][m80_hrci], tlm[msid][m80_hrci] - pred[msid][m80_hrci],  "vb", markersize=5)
+    plt.plot(pred[msid][m80_hrcs], tlm[msid][m80_hrcs] - pred[msid][m80_hrcs],  "vk", markersize=5)
+    plt.plot(pred[msid][m80_aciss], tlm[msid][m80_aciss] - pred[msid][m80_aciss], "vr", markersize=5)
+    plt.plot(pred[msid][m80_acisi], tlm[msid][m80_acisi] - pred[msid][m80_acisi], "vg", markersize=5)
+
+    plt.plot(pred[msid][mid_hrci], tlm[msid][mid_hrci] - pred[msid][mid_hrci],  "^b", markersize=5)
+    plt.plot(pred[msid][mid_hrcs], tlm[msid][mid_hrcs] - pred[msid][mid_hrcs],  "^k", markersize=5)
+    plt.plot(pred[msid][mid_aciss], tlm[msid][mid_aciss] - pred[msid][mid_aciss], "^r", markersize=5)
+    plt.plot(pred[msid][mid_acisi], tlm[msid][mid_acisi] - pred[msid][mid_acisi], "^g", markersize=5)
+
+    plt.plot(pred[msid][aft_hrci], tlm[msid][aft_hrci] - pred[msid][aft_hrci],  ".b", markersize=2)
+    plt.plot(pred[msid][aft_hrcs], tlm[msid][aft_hrcs] - pred[msid][aft_hrcs],  ".k", markersize=2)
+    plt.plot(pred[msid][aft_aciss], tlm[msid][aft_aciss] - pred[msid][aft_aciss], ".r", markersize=2)
+    plt.plot(pred[msid][aft_acisi], tlm[msid][aft_acisi] - pred[msid][aft_acisi], ".g", markersize=2)
+
+    maxmodeltemp=ndarray.max(pred[msid][good_mask])
+    maxresid=ndarray.max(tlm[msid][good_mask]-pred[msid][good_mask])
+    x = np.array(np.linspace(52.5-maxresid,maxmodeltemp,num=5))
+    my_y = 52.5 - x
+    plt.plot( x, my_y )
+
+    plt.ylabel('Data - Model')
+    plt.xlabel('1pdeaat Model')
+    plt.title('blue,black,red,green=hrci,hrcs,aciss,acisi, 45<o<65<v<80<^<90<.')
+    plt.grid()
+
+    # raise ValueError
+    outfile=os.path.join(outdir,'1pdeaat_resid.png')
+    fig.savefig(outfile)
 
     return plots
 
@@ -899,6 +1051,7 @@ def globfile(pathglob):
         return files[0]
 
 
+
 if __name__ == '__main__':
     opt, args = get_options()
     if opt.version:
@@ -906,7 +1059,7 @@ if __name__ == '__main__':
         sys.exit(0)
 
     try:
-        main(opt)
+        data=main(opt)
     except Exception, msg:
         if opt.traceback:
             raise
