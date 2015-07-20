@@ -172,20 +172,11 @@ def main(opt):
         tstart = tnow
 
     # Get temperature telemetry for 3 weeks prior to min(tstart, NOW)
-    # tlm = get_telem_values(min(tstart, tnow),
-    #                        ['1pdeaat','1pin1at',
-    #                         'sim_z', 'aosares1',
-    #                         'dp_dpa_power'],
-    #                        days=opt.days,
-    #                        name_map={'sim_z': 'tscpos',
-    #                                  'aosares1': 'pitch'})
-    #                        days=opt.days,
-    #                        name_map={'sim_z': 'tscpos',
-    #                                  'aosares1': 'pitch'})
+    
     tlm = get_telem_values(min(tstart, tnow),
                            ['1pdeaat','1pin1at',
                             'sim_z', 'aosares1',
-                            'dp_dpa_power','1dahtbon'],
+                            'dp_dpa_power', '1dahtbon'],
                            days=opt.days,
                            name_map={'sim_z': 'tscpos',
                                      'aosares1': 'pitch',
@@ -252,9 +243,6 @@ def make_week_predict(opt, tstart, tstop, bs_cmds, tlm, db):
     logger.debug("In make_week_predict")
 
     # Try to make initial state0 from cmd line options
-    # state0 = dict((x, getattr(opt, x))
-    #               for x in ('pitch', 'simpos', 'ccd_count', 'fep_count',
-    #                         'vid_board', 'clocking', 'T_psmc','T_pin1at'))
     state0 = dict((x, getattr(opt, x))
                   for x in ('pitch', 'simpos', 'ccd_count', 'fep_count',
                             'vid_board', 'clocking', 'T_psmc','T_pin1at',
