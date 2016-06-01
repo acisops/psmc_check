@@ -278,7 +278,8 @@ def make_week_predict(opt, tstart, tstop, bs_cmds, tlm, db):
         ok = ((tlm['date'] >= state0['tstart'] - 700) &
               (tlm['date'] <= state0['tstart'] + 700))
         state0.update({'T_psmc': np.mean(tlm['1pdeaat'][ok])})
-        state0.update({'T_pin1at': np.mean(tlm['1pin1at'][ok]) + 3.0 })
+        # state0.update({'T_pin1at': np.mean(tlm['1pin1at'][ok]) + 3.0 })
+        state0.update({'T_pin1at': np.mean(tlm['1pdeaat'][ok]) - 10.0 })
 
         
 
